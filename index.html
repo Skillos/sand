@@ -1,0 +1,1511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>Sand</title>
+<style>
+/* ============================================================================
+   UI STYLES — minimal; the sand is the app
+   ========================================================================== */
+html, body {
+  margin: 0; height: 100%; background: #000; overflow: hidden;
+  overscroll-behavior: none; touch-action: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #f4efe6;
+}
+canvas#c { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+#intro {
+  position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at 50% 45%, rgba(10,8,6,.25), rgba(6,5,4,.72));
+  transition: opacity .9s ease; z-index: 10; cursor: pointer;
+}
+#intro.gone { opacity: 0; pointer-events: none; }
+#intro .t { font-weight: 200; font-size: 64px; letter-spacing: .32em; margin-right: -.32em; text-shadow: 0 2px 30px rgba(0,0,0,.6); }
+#intro .s { margin-top: 18px; font-size: 13px; letter-spacing: .28em; text-transform: uppercase; opacity: .7; animation: pulse 2.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+#menuBtn {
+  position: fixed; z-index: 5; width: 34px; height: 34px; border-radius: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 10px); right: calc(env(safe-area-inset-right, 0px) + 10px);
+  border: 1px solid rgba(255,255,255,.55); background: rgba(0,0,0,.12); opacity: .22; padding: 0;
+  transition: opacity .3s; display: none;
+}
+#menuBtn::after { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: #fff; box-shadow: -8px 0 0 #fff, 8px 0 0 #fff; }
+#menuBtn:active { opacity: .6; }
+#sheet {
+  position: fixed; z-index: 6; left: 50%; transform: translate(-50%, 120%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); width: min(92vw, 420px);
+  background: rgba(22,19,16,.72); -webkit-backdrop-filter: blur(18px) saturate(1.2); backdrop-filter: blur(18px) saturate(1.2);
+  border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 16px; box-sizing: border-box;
+  transition: transform .35s cubic-bezier(.2,.8,.2,1);
+}
+#sheet.open { transform: translate(-50%, 0); }
+#sheet .lbl { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; opacity: .5; margin: 2px 2px 10px; }
+#types { display: flex; gap: 10px; justify-content: space-between; margin-bottom: 16px; }
+#types button { flex: 1; background: none; border: 0; color: inherit; padding: 0; font-size: 10px; opacity: .65; }
+#types button.sel { opacity: 1; }
+#types button i { display: block; width: 38px; height: 38px; margin: 0 auto 6px; border-radius: 50%; border: 2px solid transparent; box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+#types button.sel i { border-color: rgba(255,255,255,.85); }
+.btns { display: flex; gap: 10px; }
+.btns button { flex: 1; height: 42px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.06); color: inherit; font-size: 14px; }
+.btns button:active { background: rgba(255,255,255,.14); }
+#note { font-size: 12px; opacity: .55; margin-top: 12px; line-height: 1.4; display: none; }
+#toast {
+  position: fixed; z-index: 7; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 28px); transform: translateX(-50%);
+  background: rgba(20,17,14,.7); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  padding: 9px 16px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .6s; pointer-events: none; white-space: nowrap;
+}
+#toast.show { opacity: .9; }
+#fatal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 30px; font-size: 15px; opacity: .8; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="intro"><div class="t">Sand</div><div class="s">tap to begin</div></div>
+<button id="menuBtn" aria-label="Settings"></button>
+<div id="sheet">
+  <div class="lbl">Sand</div>
+  <div id="types"></div>
+  <div class="btns"><button id="btnSmooth">Smooth</button><button id="btnSound">Sound on</button></div>
+  <div id="note"></div>
+</div>
+<div id="toast"></div>
+<div id="fatal"></div>
+<script>
+'use strict';
+(() => {
+/* ============================================================================
+   1. CONFIG — every tunable lives here
+   Units: horizontal distances in sim CELLS, sand height h in CELLS (same unit,
+   so slopes are physical), time in seconds.  Physical sizes are given in mm and
+   converted via mmPerCell (derived from CSS px size of the screen).
+   ========================================================================== */
+const QS = new URLSearchParams(location.search);
+const TEST = QS.has('test');
+
+const CFG = {
+  GRID_LONG: 448,          // sim cells along the long screen side
+  // --- physics -------------------------------------------------------------
+  G_SCALE: 0.22,           // gravity scale vs real 9.81 m/s^2 (keeps CFL/substeps sane)
+  VMAX_MM: 80,             // max sand speed (mm/s) -> sets substep count (CFL)
+  CFL: 0.5,                // max cells a face velocity may move per substep
+  WAVE_CFL: 0.62,          // (|v| + sqrt(gn*K*hmax)) * dt limit — the pressure term makes this a wave system
+  SUB_MAX: 40,
+  VISC: 0.12,              // velocity smoothing per substep (granular viscosity; kills odd-even modes)
+  SUB_MIN: 8,              // min substeps per frame
+  K_PRESSURE: 1.0,         // passive earth pressure (converging flow / at rest) — Savage-Hutter K_p
+  K_ACTIVE: 0.3,           // active earth pressure (spreading flow) — K_a; low => furrows don't slump flat
+  MU_S: 0.67,              // static friction  = tan(34deg) -> angle of repose
+  MU_D: 0.55,              // dynamic friction = tan(29deg)
+  MU_THIN: 0.6,            // extra friction for a sub-grain-thick layer (stray grains stay put)
+  THIN_H: 0.35,            // e-folding height (cells) of the thin-layer friction
+  V_STICK: 1.5,            // cells/s: below this a face may stick (static friction)
+  GN_MIN: 0.08,            // min normal gravity (fraction of G) e.g. when held upside down
+  RELAX_T: 0.70,           // repose relaxation threshold (tan 35deg) — defines the angle of repose
+  RELAX_C: 0.2,            // relaxation rate per iteration
+  RELAX_ITERS: 3,          // per frame
+  FLUID_TAU: 0.25,         // s, decay of per-cell fluidization (thrown sand)
+  SAND_DEPTH_MM: 5.0,      // initial mean sand depth
+  WALL_H_MM: 9.0,          // tray wall height above floor (casts shadow)
+  FINGER_R_MM: 4.5,        // finger tip modelled as a sphere of this radius
+  FINGER_TIP: 0.3,         // cells: lowest point of the finger above the floor
+  PUSH_K: 9,               // 1/s: how hard excess sand under the finger is expelled
+  SHAKE_KICK: 0.35,         // random kick accel (fraction of G) at full fluidization
+  SHAKE_TAU: 0.35,         // s, decay of shake fluidization
+  // --- rendering -----------------------------------------------------------
+  GRAIN_CSS: 1.25,         // mean grain diameter in CSS px (~3.75 device px on 3x)
+  MAT_L: 2.0,              // cells of travel per texture-coordinate reset cycle
+  LIGHT_ELEV: 27,          // deg, key light elevation (world frame)
+  LIGHT_AZ: 128,           // deg, key light azimuth in device frame when flat (from +x, CCW) -> top-left
+  LIGHT_TILT_GAIN: 0.35,   // how strongly device tilt moves the light (1 = fully world fixed)
+  KEY: [1.0, 0.84, 0.64], KEY_I: 3.1,   // warm lamp
+  SKY: [0.56, 0.68, 0.92], SKY_I: 0.68, // cool fill
+  EXPOSURE: 1.15,
+  RENDER_SCALE_MAX: 2.5,   // cap for devicePixelRatio
+  RENDER_SCALE_MIN: 1.0,
+  // --- misc ----------------------------------------------------------------
+  MOTION_DETECT_MS: 1500,
+};
+
+// Sand types: [sRGB hex, probability] per mineral class + glint probability
+const SANDS = {
+  beach:    { name: 'Beach',          sw: '#d2b98f', glint: 0.20, mu: 1.00,
+              pal: [['#d6bf98', .32], ['#c3a47a', .25], ['#e6d8bf', .15], ['#c99a7b', .10], ['#a97d52', .12], ['#54483e', .06]] },
+  white:    { name: 'White silica',   sw: '#ece8de', glint: 0.32, mu: 0.97,
+              pal: [['#efebe2', .32], ['#e0dacc', .26], ['#f8f6f0', .16], ['#d2cab9', .13], ['#c4baa6', .09], ['#8f877c', .04]] },
+  desert:   { name: 'Desert red',     sw: '#c4703f', glint: 0.10, mu: 1.03,
+              pal: [['#c46a3d', .28], ['#ad5830', .22], ['#d6895a', .18], ['#e2a77b', .10], ['#8a4426', .14], ['#4b2819', .08]] },
+  volcanic: { name: 'Black volcanic', sw: '#34312e', glint: 0.30, mu: 1.06,
+              pal: [['#2c2a28', .30], ['#1d1c1b', .26], ['#3e3a36', .18], ['#524b45', .12], ['#6f675e', .09], ['#a09482', .05]] },
+  coral:    { name: 'Pink coral',     sw: '#e8c3b4', glint: 0.12, mu: 0.98,
+              pal: [['#eed3c6', .30], ['#e4bdac', .22], ['#f7e9e1', .18], ['#d69e8d', .14], ['#fcf6f1', .10], ['#b37767', .06]] },
+};
+
+/* ============================================================================
+   2. SMALL UTILITIES
+   ========================================================================== */
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const srgbToLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const hexLin = hex => [1, 3, 5].map(i => srgbToLin(parseInt(hex.substr(i, 2), 16) / 255));
+const norm3 = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const $ = id => document.getElementById(id);
+
+/* ============================================================================
+   3. GL SETUP & HELPERS
+   ========================================================================== */
+const canvas = $('c');
+let gl = null;
+const FMT = {};       // texture formats chosen at init
+let emptyVAO = null;
+
+function initGL() {
+  gl = canvas.getContext('webgl2', {
+    antialias: false, alpha: false, depth: false, stencil: false, premultipliedAlpha: false,
+    preserveDrawingBuffer: TEST, powerPreference: 'high-performance',
+  });
+  if (!gl) return false;
+  const cbf = gl.getExtension('EXT_color_buffer_float');
+  const cbh = gl.getExtension('EXT_color_buffer_half_float');
+  // State must be float32 for mass conservation. Half float only as a last resort.
+  FMT.simInternal = cbf ? gl.RGBA32F : gl.RGBA16F;
+  FMT.sim32 = !!cbf;
+  if (!cbf && !cbh) console.warn('[sand] no float render targets; sand will be low quality');
+  emptyVAO = gl.createVertexArray();
+  return true;
+}
+
+function compile(type, src, name) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {
+    const log = gl.getShaderInfoLog(s);
+    const numbered = src.split('\n').map((l, i) => (i + 1) + ': ' + l).join('\n');
+    console.error('[sand] shader ' + name + ' failed:\n' + log + '\n' + numbered);
+    throw new Error('shader compile failed: ' + name);
+  }
+  return s;
+}
+
+function makeProgram(name, fsSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VS, name + '.vs'));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc, name));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) {
+    console.error('[sand] link ' + name + ': ' + gl.getProgramInfoLog(p));
+    throw new Error('link failed: ' + name);
+  }
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    const key = info.name.replace(/\[0\]$/, '');
+    u[key] = { loc: gl.getUniformLocation(p, info.name), type: info.type, size: info.size };
+  }
+  return { p, u, name };
+}
+
+function setUniform(prog, name, v) {
+  const e = prog.u[name]; if (!e) return;
+  const L = e.loc;
+  switch (e.type) {
+    case gl.FLOAT: e.size > 1 ? gl.uniform1fv(L, v) : gl.uniform1f(L, v); break;
+    case gl.FLOAT_VEC2: gl.uniform2fv(L, v); break;
+    case gl.FLOAT_VEC3: gl.uniform3fv(L, v); break;
+    case gl.FLOAT_VEC4: gl.uniform4fv(L, v); break;
+    case gl.INT: case gl.BOOL: case gl.SAMPLER_2D: e.size > 1 ? gl.uniform1iv(L, v) : gl.uniform1i(L, v); break;
+    case gl.INT_VEC2: gl.uniform2iv(L, v); break;
+    default: break;
+  }
+}
+
+function makeTex(w, h, internal, filter, data) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, gl.RGBA, gl.FLOAT, data || null);
+  return t;
+}
+
+// A render target with 1..n color attachments of identical size.
+function makeTarget(w, h, internals, filter) {
+  const texs = internals.map(f => makeTex(w, h, f, filter));
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  texs.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  const bufs = texs.map((_, i) => gl.COLOR_ATTACHMENT0 + i);
+  gl.drawBuffers(bufs);
+  const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (st !== gl.FRAMEBUFFER_COMPLETE) console.error('[sand] framebuffer incomplete', st);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, texs, w, h, bufs };
+}
+function freeTarget(t) { if (!t) return; t.texs.forEach(x => gl.deleteTexture(x)); gl.deleteFramebuffer(t.fbo); }
+
+function makePingPong(w, h, internals, filter) {
+  return { a: makeTarget(w, h, internals, filter), b: makeTarget(w, h, internals, filter),
+           get read() { return this.a; }, get write() { return this.b; },
+           swap() { const t = this.a; this.a = this.b; this.b = t; } };
+}
+
+// Run a full-screen pass. textures: {uniformName: WebGLTexture}
+function runPass(prog, target, uniforms, textures) {
+  gl.useProgram(prog.p);
+  if (target) { gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo); gl.viewport(0, 0, target.w, target.h); }
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, canvas.width, canvas.height); }
+  let unit = 0;
+  for (const k in textures) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, textures[k]);
+    setUniform(prog, k, unit); unit++;
+  }
+  for (const k in uniforms) setUniform(prog, k, uniforms[k]);
+  gl.bindVertexArray(emptyVAO);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+/* ============================================================================
+   4. SHADERS
+   Physics passes (sim resolution, RGBA32F ping-pong, texelFetch only):
+     VEL       : face velocities — semi-Lagrangian advection, gravity, depth-gradient
+                 pressure, Coulomb friction (static/dynamic), shake kicks, fingers
+     TRANSPORT : conservative upwind flux of h (and fluidization) through faces
+     RELAX     : mass-conserving repose relaxation (safety net for over-steep slopes)
+     MATADV    : advects two grain-texture coordinate layers with the sand
+   Render passes:
+     PREP      : sim res -> RGBA16F: height, gradient, soft shadows, AO
+     MAIN      : screen res -> grains, floor, lighting, tonemap
+     REDUCE    : sim -> 16x16 sums for audio / sleep (async readback)
+   STATE texel (i,j) = (h, u, v, fluid): h at cell centre, u on the RIGHT face
+   (i+1/2), v on the TOP face (j+1/2) — a staggered (MAC) layout.
+   Device frame: +x right, +y towards the top of the device, +z out of screen.
+   ========================================================================== */
+const VS = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const GLSL_COMMON = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uint hashu(uint x) { x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16; return x; }
+uint hash2u(ivec2 p, uint s) { return hashu(uint(p.x) * 1597334677U ^ hashu(uint(p.y) * 3812015801U ^ s)); }
+float h01(uint h) { return float(h & 0xffffffU) / 16777216.0; }
+float vnoise(vec2 p) {
+  vec2 i = floor(p); vec2 f = p - i; vec2 u = f * f * (3.0 - 2.0 * f);
+  ivec2 c = ivec2(i);
+  float a = h01(hash2u(c, 11u)), b = h01(hash2u(c + ivec2(1, 0), 11u));
+  float d = h01(hash2u(c + ivec2(0, 1), 11u)), e = h01(hash2u(c + ivec2(1, 1), 11u));
+  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+`;
+
+const GLSL_SIM = `
+uniform sampler2D uState;
+uniform ivec2 uGrid;
+vec4 st(ivec2 c) { return texelFetch(uState, clamp(c, ivec2(0), uGrid - 1), 0); }
+bool inside(ivec2 c) { return all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, uGrid)); }
+// velocity on the face owned by cell c: ax 0 = right face (u), ax 1 = top face (v). 0 outside.
+float faceAt(ivec2 c, int ax) {
+  if (!inside(c)) return 0.0;
+  vec4 s = texelFetch(uState, c, 0);
+  return ax == 0 ? s.g : s.b;
+}
+vec2 cellVel(ivec2 c) {
+  return vec2(0.5 * (faceAt(c, 0) + faceAt(c - ivec2(1, 0), 0)), 0.5 * (faceAt(c, 1) + faceAt(c - ivec2(0, 1), 1)));
+}
+`;
+
+// ---- PHYSICS: velocity update ---------------------------------------------
+const FS_VEL = GLSL_COMMON + GLSL_SIM + `
+uniform float uDt, uVmax, uK, uKa, uMuS, uMuD, uMuThin, uThinH, uVStick, uGnMin;
+uniform float uShakeFluid, uKick, uFluidDecay, uPushK, uSeed, uVisc;
+uniform vec3 uG;               // gravity + inertial accel, device frame, cells/s^2
+uniform vec4 uFA[4];           // finger: xy pos (cells), z sphere radius, w unused
+uniform vec4 uFB[4];           // finger: xy velocity (cells/s), z tip height, w fluidization
+uniform int uNF;
+out vec4 o;
+
+float hC(ivec2 c) { return st(c).r; }
+float gradAlong(ivec2 c, int ax) { ivec2 e = ax == 0 ? ivec2(1, 0) : ivec2(0, 1); return 0.5 * (hC(c + e) - hC(c - e)); }
+
+// bilinear sample of a face-velocity field at continuous position p (cell units)
+float sampleFace(vec2 p, int ax) {
+  vec2 t = p - (ax == 0 ? vec2(1.0, 0.5) : vec2(0.5, 1.0));
+  vec2 fl = floor(t); ivec2 i = ivec2(fl); vec2 f = t - fl;
+  float a = faceAt(i, ax), b = faceAt(i + ivec2(1, 0), ax);
+  float c = faceAt(i + ivec2(0, 1), ax), d = faceAt(i + ivec2(1, 1), ax);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fingerTarget(vec2 p, vec4 A, float tip) {
+  float r = length(p - A.xy); float R = A.z;
+  if (r >= R) return 1e9;
+  return tip + R - sqrt(R * R - r * r);
+}
+vec2 kickAt(vec2 p) {
+  if (uKick <= 0.0) return vec2(0.0);
+  vec2 q = p * 0.06;
+  return (vec2(vnoise(q + uSeed * 13.17), vnoise(q - uSeed * 7.31 + 31.4)) - 0.5) * 2.0 * uKick;
+}
+
+float updateFace(ivec2 c, int ax, float fluid) {
+  ivec2 e  = ax == 0 ? ivec2(1, 0) : ivec2(0, 1);
+  ivec2 et = ax == 0 ? ivec2(0, 1) : ivec2(1, 0);
+  ivec2 n = c + e;
+  if (!inside(n)) return 0.0;                         // wall: zero normal velocity
+  float h0 = hC(c), h1 = hC(n);
+  if (max(h0, h1) < 1e-5) return 0.0;
+  vec2 fp = vec2(c) + 0.5 + 0.5 * vec2(e);            // face position
+  int tx = 1 - ax;
+  float vn = faceAt(c, ax);
+  float vt = 0.25 * (faceAt(c, tx) + faceAt(n, tx) + faceAt(c - et, tx) + faceAt(n - et, tx));
+  vec2 vel = ax == 0 ? vec2(vn, vt) : vec2(vt, vn);
+  vn = sampleFace(fp - uDt * vel, ax);                // semi-Lagrangian advection
+  float nb = 0.25 * (faceAt(c + e, ax) + faceAt(c - e, ax) + faceAt(c + et, ax) + faceAt(c - et, ax));
+  vn = mix(vn, nb, uVisc);                            // granular viscosity
+  vel = ax == 0 ? vec2(vn, vt) : vec2(vt, vn);
+
+  float gn = max(-uG.z, uGnMin);
+  float gN = h1 - h0;
+  float gT = 0.5 * (gradAlong(c, tx) + gradAlong(n, tx));
+  vec2 grad = ax == 0 ? vec2(gN, gT) : vec2(gT, gN);
+  // Savage-Hutter: passive pressure when the flow converges (or rests), active when it spreads
+  float divC = faceAt(c, 0) - faceAt(c - ivec2(1, 0), 0) + faceAt(c, 1) - faceAt(c - ivec2(0, 1), 1);
+  float divN = faceAt(n, 0) - faceAt(n - ivec2(1, 0), 0) + faceAt(n, 1) - faceAt(n - ivec2(0, 1), 1);
+  float K = mix(uK, uKa, smoothstep(-2.0, 2.0, 0.5 * (divC + divN)));
+  vec2 kick = kickAt(fp);
+  vec2 Fhold = uG.xy - gn * uK * grad + kick;
+  vec2 F = uG.xy - gn * K * grad + kick;              // driving acceleration
+  float hm = 0.5 * (h0 + h1);
+  float fl = max(fluid, uShakeFluid);
+  float red = 1.0 - 0.88 * fl;
+  float thin = uMuThin * exp(-hm / uThinH);
+  float muS = uMuS * red + thin, muD = uMuD * red + thin;
+  if (length(vel) < uVStick && length(Fhold) < muS * gn) {
+    vel = vec2(0.0);                                  // static friction holds
+  } else {
+    vel += F * uDt;
+    float s = length(vel);
+    vel *= max(0.0, s - muD * gn * uDt) / max(s, 1e-6); // Coulomb dynamic friction
+  }
+  // fingers: expel sand above the finger surface outward + along the finger motion
+  for (int k = 0; k < 4; k++) {
+    if (k >= uNF) break;
+    vec4 A = uFA[k], B = uFB[k];
+    float t0 = fingerTarget(vec2(c) + 0.5, A, B.z), t1 = fingerTarget(vec2(n) + 0.5, A, B.z);
+    float ex = max(h0 - t0, h1 - t1);
+    if (ex > 0.0) {
+      vec2 d = fp - A.xy; float r = length(d);
+      vec2 nr = r > 1e-3 ? d / r : vec2(1.0, 0.0);
+      float adv = max(dot(B.xy, nr), 0.0);
+      vec2 vd = nr * (adv + uPushK * ex) + B.xy * 0.2;
+      vel = mix(vel, vd, clamp(ex * 1.5, 0.0, 1.0));
+    }
+  }
+  float v = ax == 0 ? vel.x : vel.y;
+  // fingers may drive sand faster than vmax (the transport limiter keeps h >= 0)
+  float lim = uNF > 0 ? 2.0 * uVmax : uVmax;
+  return clamp(v, -lim, lim);
+}
+
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 s = st(c);
+  float fluid = s.a * uFluidDecay;
+  for (int k = 0; k < 4; k++) {
+    if (k >= uNF) break;
+    if (s.r > fingerTarget(vec2(c) + 0.5, uFA[k], uFB[k].z)) fluid = max(fluid, uFB[k].w);
+  }
+  o = vec4(s.r, updateFace(c, 0, fluid), updateFace(c, 1, fluid), fluid);
+}`;
+
+// ---- PHYSICS: conservative transport ---------------------------------------
+const FS_TRANSPORT = GLSL_COMMON + GLSL_SIM + `
+uniform float uDt;
+out vec4 o;
+// total outward face speed of a donor cell -> positivity limiter (identical on both sides of a face)
+float outSpeed(ivec2 d) {
+  return max(faceAt(d, 0), 0.0) + max(-faceAt(d - ivec2(1, 0), 0), 0.0)
+       + max(faceAt(d, 1), 0.0) + max(-faceAt(d - ivec2(0, 1), 1), 0.0);
+}
+// signed flux (+axis direction) through the face owned by c: (mass, fluid*mass)
+vec2 flux(ivec2 c, int ax) {
+  float u = faceAt(c, ax);
+  if (u == 0.0) return vec2(0.0);
+  ivec2 e = ax == 0 ? ivec2(1, 0) : ivec2(0, 1);
+  ivec2 d = u > 0.0 ? c : c + e;
+  vec4 sd = st(d);
+  float sc = min(1.0, 1.0 / max(uDt * outSpeed(d), 1e-9));
+  // a few grains stay caught in the floor texture wherever sand slid off (stray grains)
+  float rs = h01(hash2u(d, 5u));
+  float avail = max(sd.r - 0.12 * rs * rs * rs, 0.0);
+  float f = u * uDt * avail * sc;
+  return vec2(f, f * sd.a);
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 s = st(c);
+  vec2 fr = flux(c, 0), fl = flux(c - ivec2(1, 0), 0), ft = flux(c, 1), fb = flux(c - ivec2(0, 1), 1);
+  float h = s.r + (fl.x - fr.x) + (fb.x - ft.x);
+  float fm = s.r * s.a + (fl.y - fr.y) + (fb.y - ft.y);
+  o = vec4(h, s.g, s.b, h > 1e-6 ? clamp(fm / h, 0.0, 1.0) : 0.0);
+}`;
+
+// ---- PHYSICS: repose relaxation (antisymmetric pair fluxes => exact conservation)
+// Moves sand between neighbours whose surface points differ in WORLD height by more than
+// tan(repose) x world-horizontal distance (exact for any device tilt, not small-angle).
+const FS_RELAX = GLSL_COMMON + GLSL_SIM + `
+uniform vec3 uGdir;      // unit gravity direction, device frame
+uniform float uT, uC, uMuThin, uThinH, uShakeFluid;
+out vec4 o;
+float pf(ivec2 c, int ax) {
+  ivec2 e = ax == 0 ? ivec2(1, 0) : ivec2(0, 1);
+  ivec2 n = c + e;
+  if (!inside(c) || !inside(n)) return 0.0;
+  float h0 = st(c).r, h1 = st(n).r;
+  vec3 dP = vec3(vec2(e), h1 - h0);
+  float dH = -dot(dP, uGdir);                         // world rise from c to n
+  float dL = sqrt(max(dot(dP, dP) - dH * dH, 1e-6));  // world horizontal distance
+  float T = uT * (1.0 - 0.9 * uShakeFluid);
+  if (dH < 0.0) { float Te = T + uMuThin * exp(-h0 / uThinH); float x = -dH - Te * dL; return x > 0.0 ? min(uC * x, 0.2 * h0) : 0.0; }
+  float Te = T + uMuThin * exp(-h1 / uThinH); float x = dH - Te * dL;
+  return x > 0.0 ? -min(uC * x, 0.2 * h1) : 0.0;
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 s = st(c);
+  float h = s.r + pf(c - ivec2(1, 0), 0) - pf(c, 0) + pf(c - ivec2(0, 1), 1) - pf(c, 1);
+  o = vec4(h, s.gba);
+}`;
+
+// ---- PHYSICS: grain texture-coordinate advection (two phase-shifted layers) --
+const FS_MATADV = GLSL_COMMON + GLSL_SIM + `
+uniform sampler2D uM1;   // (dA.xy, dB.xy): material coord = cell pos + d
+uniform sampler2D uM2;   // (s = travel accumulator, 0, 0, 0)
+uniform float uDtF, uL;
+layout(location = 0) out vec4 o1;
+layout(location = 1) out vec4 o2;
+vec4 bil(sampler2D t, vec2 p) {
+  vec2 q = p - 0.5; vec2 fl = floor(q); ivec2 i = ivec2(fl); vec2 f = q - fl; ivec2 m = uGrid - 1;
+  vec4 a = texelFetch(t, clamp(i, ivec2(0), m), 0), b = texelFetch(t, clamp(i + ivec2(1, 0), ivec2(0), m), 0);
+  vec4 c = texelFetch(t, clamp(i + ivec2(0, 1), ivec2(0), m), 0), d = texelFetch(t, clamp(i + ivec2(1, 1), ivec2(0), m), 0);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  // texture velocity: 3x3-smoothed cell velocity (grain-scale noise in v would shred the texture)
+  vec2 vc = vec2(0.0);
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) vc += cellVel(c + ivec2(i, j)) * ((i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0));
+  vc /= 16.0;
+  vec2 bp = vec2(c) + 0.5 - vc * uDtF;
+  vec4 m = bil(uM1, bp);
+  float s0 = bil(uM2, bp).r;
+  // diffuse the phase a little so neighbouring cells cycle together (avoids reset seams)
+  ivec2 mx = uGrid - 1;
+  float sn = 0.25 * (texelFetch(uM2, clamp(c + ivec2(1, 0), ivec2(0), mx), 0).r + texelFetch(uM2, clamp(c - ivec2(1, 0), ivec2(0), mx), 0).r
+                   + texelFetch(uM2, clamp(c + ivec2(0, 1), ivec2(0), mx), 0).r + texelFetch(uM2, clamp(c - ivec2(0, 1), ivec2(0), mx), 0).r);
+  s0 = mix(s0, sn, 0.15);
+  // distortion (stretch/compression/shear) of the currently dominant layer: keep cycling until it is fresh
+  vec4 mxp = texelFetch(uM1, clamp(c + ivec2(1, 0), ivec2(0), mx), 0), mxm = texelFetch(uM1, clamp(c - ivec2(1, 0), ivec2(0), mx), 0);
+  vec4 myp = texelFetch(uM1, clamp(c + ivec2(0, 1), ivec2(0), mx), 0), mym = texelFetch(uM1, clamp(c - ivec2(0, 1), ivec2(0), mx), 0);
+  vec4 jx = 0.5 * (mxp - mxm), jy = 0.5 * (myp - mym);
+  float distA = abs(jx.x) + abs(jx.y) + abs(jy.x) + abs(jy.y);
+  float distB = abs(jx.z) + abs(jx.w) + abs(jy.z) + abs(jy.w);
+  float wA = 1.0 - abs(2.0 * fract(s0 / uL) - 1.0);
+  float distDom = wA > 0.5 ? distA : distB;
+  float s1 = s0 + length(vc) * uDtF + uL * 8.0 * uDtF * clamp((distDom - 0.06) * 4.0, 0.0, 1.0);
+  vec2 dA = m.xy - vc * uDtF, dB = m.zw - vc * uDtF;
+  if (floor(s1 / uL) != floor(s0 / uL)) dA = vec2(0.0);              // A resets when its weight is 0
+  if (floor(s1 / uL + 0.5) != floor(s0 / uL + 0.5)) dB = vec2(0.0);  // B half a cycle later
+  o1 = vec4(dA, dB);
+  o2 = vec4(s1, 0.0, 0.0, 0.0);
+}`;
+
+// ---- RENDER: prep (sim res): height/gradient + soft shadows + AO -------------
+const FS_PREP = GLSL_COMMON + GLSL_SIM + `
+uniform vec3 uL;
+uniform float uWallH;
+layout(location = 0) out vec4 o0;   // h, dh/dx, dh/dy, speed
+layout(location = 1) out vec4 o1;   // shadow, ao, fluid, 0
+float hB(vec2 p) {
+  if (p.x < 0.0 || p.y < 0.0 || p.x > float(uGrid.x) || p.y > float(uGrid.y)) return uWallH;
+  vec2 q = p - 0.5; vec2 fl = floor(q); ivec2 i = ivec2(fl); vec2 f = q - fl;
+  float a = st(i).r, b = st(i + ivec2(1, 0)).r, c = st(i + ivec2(0, 1)).r, d = st(i + ivec2(1, 1)).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 s = st(c);
+  float h = max(s.r, 0.0);
+  // slightly smoothed central-difference gradient (3x3 Sobel-like)
+  float hl = st(c - ivec2(1, 0)).r, hr = st(c + ivec2(1, 0)).r, hd = st(c - ivec2(0, 1)).r, hu = st(c + ivec2(0, 1)).r;
+  float hld = st(c + ivec2(-1, -1)).r, hrd = st(c + ivec2(1, -1)).r, hlu = st(c + ivec2(-1, 1)).r, hru = st(c + ivec2(1, 1)).r;
+  float gx = ((hr - hl) * 2.0 + (hru - hlu) + (hrd - hld)) / 8.0;
+  float gy = ((hu - hd) * 2.0 + (hlu - hld) + (hru - hrd)) / 8.0;
+  vec2 p0 = vec2(c) + 0.5;
+  // soft heightfield shadow toward the key light (walls are tall cells outside the grid)
+  vec2 dir = normalize(uL.xy + 1e-6);
+  float tanE = uL.z / max(length(uL.xy), 1e-4);
+  float z0 = h + 0.15, sh = 1.0, t = 0.7;
+  for (int i = 0; i < 34; i++) {
+    float hs = hB(p0 + dir * t);
+    float zr = z0 + t * tanE;
+    sh = min(sh, clamp(0.5 + 0.9 * (zr - hs) / t, 0.0, 1.0));
+    if (zr > uWallH + 2.0 || sh <= 0.0) break;
+    t = t * 1.12 + 0.35;
+  }
+  // AO: average horizon elevation at two radii, 8 directions
+  float occ = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 0.7853982 + 0.3;
+    vec2 d = vec2(cos(a), sin(a));
+    occ += clamp((hB(p0 + d * 3.0) - h) / 3.0, 0.0, 1.0);
+    occ += clamp((hB(p0 + d * 9.0) - h) / 9.0, 0.0, 1.0);
+  }
+  float ao = 1.0 - 0.55 * clamp(occ / 16.0 * 1.6, 0.0, 1.0);
+  o0 = vec4(h, gx, gy, length(cellVel(c)));
+  o1 = vec4(sh, ao, s.a, 0.0);
+}`;
+
+// ---- RENDER: main (screen res) -----------------------------------------------
+const FS_MAIN = GLSL_COMMON + `
+uniform sampler2D uP0, uP1;      // RGBA16F, LINEAR
+uniform sampler2D uM1, uM2;      // RGBA32F, texelFetch
+uniform ivec2 uGrid;
+uniform vec2 uRes;
+uniform int uRot;                // screen rotation in quarter turns
+uniform vec3 uL, uKey, uSky;
+uniform float uGrainScale;       // grain units per sim cell
+uniform float uMatL, uMmPerCell, uExposure, uGlintP, uFrame;
+uniform int uDebug;               // 0 normal, 1 shadow, 2 AO, 3 height, 4 normals, 5 tex distortion
+uniform vec3 uPal[6];
+uniform float uPalCdf[6];
+uniform vec3 uPalAvg;
+out vec4 frag;
+
+vec2 toDevice(vec2 uv) { vec2 q = uv - 0.5; for (int i = 0; i < 3; i++) { if (i >= uRot) break; q = vec2(q.y, -q.x); } return q + 0.5; }
+
+// Cubic B-spline sampling with 4 bilinear taps (C2 smooth -> no grid artifacts in normals)
+vec4 bicubic(sampler2D t, vec2 p) {
+  vec2 size = vec2(uGrid);
+  vec2 q = p - 0.5; vec2 i = floor(q); vec2 f = q - i;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (-f3 + 3.0 * f2 - 3.0 * f + 1.0) / 6.0;
+  vec2 w1 = (3.0 * f3 - 6.0 * f2 + 4.0) / 6.0;
+  vec2 w2 = (-3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 g0 = w0 + w1, g1 = w2 + w3;
+  vec2 h0 = (i - 1.0 + w1 / g0 + 0.5) / size;
+  vec2 h1 = (i + 1.0 + w3 / g1 + 0.5) / size;
+  return g0.y * (g0.x * texture(t, h0) + g1.x * texture(t, vec2(h1.x, h0.y)))
+       + g1.y * (g0.x * texture(t, vec2(h0.x, h1.y)) + g1.x * texture(t, h1));
+}
+vec4 bil32(sampler2D t, vec2 p) {
+  vec2 q = p - 0.5; vec2 fl = floor(q); ivec2 i = ivec2(fl); vec2 f = q - fl; ivec2 m = uGrid - 1;
+  vec4 a = texelFetch(t, clamp(i, ivec2(0), m), 0), b = texelFetch(t, clamp(i + ivec2(1, 0), ivec2(0), m), 0);
+  vec4 c = texelFetch(t, clamp(i + ivec2(0, 1), ivec2(0), m), 0), d = texelFetch(t, clamp(i + ivec2(1, 1), ivec2(0), m), 0);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; } return s; }
+
+// Dark oiled walnut floor: long fibres + irregular growth bands + pores
+vec3 woodAlbedo(vec2 mm) {
+  vec2 wp = vec2(mm.x + 4.0 * fbm(mm * vec2(0.02, 0.004)), mm.y);
+  float bands = fbm(vec2(wp.x * 0.22, wp.y * 0.006));                 // broad irregular grain figure
+  float fib = fbm(vec2(wp.x * 2.2, wp.y * 0.05));                     // long fibres
+  float fine = vnoise(vec2(wp.x * 9.0, wp.y * 0.3));
+  float pores = smoothstep(0.78, 0.97, vnoise(vec2(wp.x * 13.0 + 3.0, wp.y * 0.7)));
+  float t = clamp(0.55 * smoothstep(0.3, 0.75, bands) + 0.3 * fib + 0.15 * fine, 0.0, 1.0);
+  vec3 dark = vec3(0.030, 0.016, 0.009), light = vec3(0.085, 0.048, 0.026);
+  return mix(dark, light, t) * (1.0 - 0.4 * pores);
+}
+
+vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+vec3 toSRGB(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+
+void main() {
+  vec2 duv = toDevice(gl_FragCoord.xy / uRes);
+  vec2 p = duv * vec2(uGrid);                       // continuous cell coords (device frame)
+  vec4 P0 = bicubic(uP0, p), P1 = bicubic(uP1, p);
+  float h = max(P0.x, 0.0);
+  vec2 grad = P0.yz;
+  float macroSh = clamp(P1.x, 0.0, 1.0), macroAO = clamp(P1.y, 0.0, 1.0);
+
+  vec3 Nm = normalize(vec3(-grad, 1.0));
+  vec3 T = normalize(vec3(1.0, 0.0, grad.x));
+  vec3 Bt = normalize(cross(Nm, T)); T = cross(Bt, Nm);
+  vec3 Ll = normalize(vec3(dot(uL, T), dot(uL, Bt), dot(uL, Nm)));   // light in local (tangent) frame
+  vec3 H = normalize(uL + vec3(0.0, 0.0, 1.0));
+
+  // --- grain coordinates: two advected layers (phase-shifted). Each layer's grains are thinned by
+  // the layer's weight and both sets are composited as one packing -> no seams, no cross-fade ghosting.
+  vec4 M = bil32(uM1, p);
+  float s = bil32(uM2, p).r;
+  float wA = 1.0 - abs(2.0 * fract(s / uMatL) - 1.0);
+
+  // --- grains: 2 layers x 3x3 candidate spheres, pick the highest surface at this pixel
+  vec3 cand[18]; float rad[18]; float pres[18]; uint ids[18];
+  float bestZ = -1.0; int best = -1; float nearD = 1e9;
+  for (int L = 0; L < 2; L++) {
+    vec2 g = (p + (L == 0 ? M.xy : M.zw)) * uGrainScale;
+    float wL = L == 0 ? wA : 1.0 - wA;
+    uint layer = uint(L + 1);
+    vec2 gi = floor(g), gf = g - gi;
+    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+      int k = L * 9 + (j + 1) * 3 + (i + 1);
+      uint hs = hash2u(ivec2(gi) + ivec2(i, j), layer);
+      uint h2 = hashu(hs ^ 0x9e3779b9u);
+      vec2 jit = vec2(h01(hs), h01(hashu(hs + 1u)));
+      float r = mix(0.56, 0.86, pow(h01(h2), 1.5));
+      vec2 cp = vec2(float(i), float(j)) + 0.1 + 0.8 * jit - gf;     // centre rel. to pixel (grain units)
+      float hc = h + dot(grad, cp / uGrainScale);                    // local sand depth at the grain
+      float cov = smoothstep(0.02, 1.8, hc);
+      float pr = (h01(hashu(h2 + 17u)) < cov && h01(hashu(h2 + 29u)) < wL) ? 1.0 : 0.0;
+      float zc = r * (1.0 + 0.45 * h01(hashu(h2 + 3u)) * smoothstep(0.5, 1.5, hc));
+      cand[k] = vec3(cp, zc); rad[k] = r; pres[k] = pr; ids[k] = h2;
+      float d2 = dot(cp, cp);
+      if (pr > 0.5) {
+        if (d2 < r * r) { float z = zc + sqrt(r * r - d2); if (z > bestZ) { bestZ = z; best = k; } }
+        nearD = min(nearD, sqrt(d2) - r);
+      }
+    }
+  }
+
+  float thick = smoothstep(0.6, 1.6, h);
+  vec3 col;
+  if (best >= 0) {
+    vec3 C = cand[best]; float r = rad[best]; uint id = ids[best];
+    vec3 ng = vec3(-C.xy, bestZ - C.z) / r;
+    ng = normalize(vec3(ng.xy * 0.55, ng.z));
+    vec3 N = normalize(T * ng.x + Bt * ng.y + Nm * ng.z);
+    // micro shadows: ray from this surface point toward the light vs neighbour spheres
+    vec3 P = vec3(0.0, 0.0, bestZ);
+    float msh = 1.0;
+    for (int k = 0; k < 18; k++) {
+      if (k == best || pres[k] < 0.5) continue;
+      vec3 oc = P - cand[k];
+      float b = dot(oc, Ll);
+      if (b < 0.0) { float dd = sqrt(max(dot(oc, oc) - b * b, 0.0)); msh *= smoothstep(rad[k] * 0.7, rad[k] * 1.12, dd); }
+    }
+    msh = mix(0.45, 1.0, msh);   // light leaks through translucent quartz neighbours
+    float cav = smoothstep(0.25, 1.35, bestZ);                       // crevice darkening
+    // mineral colour
+    float u = h01(hashu(id + 101u));
+    vec3 alb = uPal[5];
+    for (int q = 0; q < 6; q++) { if (u < uPalCdf[q]) { alb = uPal[q]; break; } }
+    alb *= 0.86 + 0.28 * h01(hashu(id + 202u));
+    alb = mix(alb, alb * vec3(1.06, 0.98, 0.92), h01(hashu(id + 909u)) - 0.5);
+    // lighting: rough diffuse with slight wrap (translucent quartz), sky fill
+    float ndl = dot(N, uL);
+    float diff = max(ndl, 0.0) * 0.85 + 0.15 * clamp((ndl + 0.3) / 1.3, 0.0, 1.0);
+    vec3 lit = uKey * diff * macroSh * msh + uSky * (0.55 + 0.45 * N.z) * macroAO * mix(0.35, 1.0, cav);
+    col = alb * lit * mix(0.78, 1.0, cav);
+    // glints: flat facet per glinty grain; twinkles as the light moves with tilt
+    if (h01(hashu(id + 303u)) < uGlintP) {
+      vec3 jt = vec3(h01(hashu(id + 404u)), h01(hashu(id + 505u)), 0.0) - vec3(0.5, 0.5, 0.0);
+      vec3 fn = normalize(Nm + T * jt.x * 0.9 + Bt * jt.y * 0.9);
+      float spot = smoothstep(r * 0.9, r * 0.15, length(C.xy));
+      col += uKey * pow(max(dot(fn, H), 0.0), 2200.0) * 40.0 * spot * macroSh * msh;
+    }
+  } else if (thick > 0.0 && nearD < 0.6) {
+    // gap between surface grains in deep sand: deeper, shadowed grains
+    vec3 lit = uKey * max(dot(Nm, uL), 0.0) * macroSh * 0.5 + uSky * macroAO * 0.65;
+    col = uPalAvg * lit * 0.8;
+    col = mix(col, vec3(0.0), 0.0);
+  } else {
+    col = vec3(-1.0);
+  }
+
+  // --- tray floor (where no grain covers this pixel and sand is thin)
+  if (col.x < 0.0 || (best < 0 && thick < 1.0)) {
+    vec2 mm = p * uMmPerCell;
+    vec3 alb = woodAlbedo(mm);
+    // floor micro-normal from wood fibres
+    float n1 = vnoise(vec2(mm.x * 6.0, mm.y * 0.2)) - 0.5;
+    vec3 Nf = normalize(vec3(n1 * 0.08, 0.0, 1.0));
+    // grain cast shadows + contact darkening on the floor
+    vec3 Lf = normalize(vec3(uL.xy, uL.z));
+    float gsh = 1.0, cao = 1.0;
+    for (int k = 0; k < 18; k++) {
+      if (pres[k] < 0.5) continue;
+      vec3 oc = -cand[k];
+      float b = dot(oc, Lf);
+      if (b < 0.0) { float dd = sqrt(max(dot(oc, oc) - b * b, 0.0)); gsh *= smoothstep(rad[k] * 0.6, rad[k] * 1.15, dd); }
+      cao *= mix(0.45, 1.0, smoothstep(rad[k] * 0.95, rad[k] * 1.7, length(cand[k].xy)));
+    }
+    float ndl = max(dot(Nf, uL), 0.0);
+    vec3 lit = uKey * ndl * macroSh * gsh + uSky * macroAO * cao * 0.9;
+    vec3 fcol = alb * lit;
+    // oiled sheen: faint sky reflection
+    fcol += uSky * 0.035 * macroAO * (0.6 + 0.4 * vnoise(mm * vec2(0.05, 0.4)));
+    col = col.x < 0.0 ? fcol : mix(fcol, col, thick);
+  }
+
+  // --- tray walls: inner edge shading
+  vec2 ed = min(p, vec2(uGrid) - p);
+  float e = min(ed.x, ed.y);
+  col *= mix(0.35, 1.0, smoothstep(0.0, 4.0, e)) * mix(0.82, 1.0, smoothstep(0.0, 22.0, e));
+
+  if (uDebug == 1) col = vec3(macroSh); else if (uDebug == 2) col = vec3(macroAO);
+  else if (uDebug == 3) col = vec3(h / 40.0);
+  else if (uDebug == 5) {   // texture-coordinate distortion of layer A (r), B (g), weight A (b)
+    vec2 gA = p + M.xy, gB2 = p + M.zw; float px = length(dFdx(p));
+    float dA = abs(length(dFdx(gA)) / px - 1.0) + abs(length(dFdy(gA)) / px - 1.0);
+    float dB = abs(length(dFdx(gB2)) / px - 1.0) + abs(length(dFdy(gB2)) / px - 1.0);
+    col = vec3(dA * wA + dB * (1.0 - wA), wA * 0.3, 0.0);
+  } else if (uDebug == 4) col = Nm * 0.5 + 0.5;
+  if (uDebug == 0) col = aces(col * uExposure);
+  col = toSRGB(col);
+  col += (h01(hash2u(ivec2(gl_FragCoord.xy), uint(uFrame))) - 0.5) / 255.0;
+  frag = vec4(col, 1.0);
+}`;
+
+// ---- REDUCE: block sums for audio/sleep -------------------------------------
+const FS_REDUCE = GLSL_COMMON + GLSL_SIM + `
+uniform ivec2 uBlock;
+out vec4 o;     // (sum h, sum h|v|, max |v|, max h)
+void main() {
+  ivec2 base = ivec2(gl_FragCoord.xy) * uBlock;
+  vec4 acc = vec4(0.0);
+  for (int j = 0; j < 64; j++) {
+    if (j >= uBlock.y) break;
+    for (int i = 0; i < 64; i++) {
+      if (i >= uBlock.x) break;
+      ivec2 c = base + ivec2(i, j);
+      if (!inside(c)) continue;
+      vec4 s = texelFetch(uState, c, 0);
+      float sp = length(s.gb);
+      float hh = max(s.r, 0.0);
+      acc.x += hh; acc.y += hh * sp; acc.z = max(acc.z, sp * step(0.05, hh)); acc.w = max(acc.w, hh);
+    }
+  }
+  o = acc;
+}`;
+
+/* ============================================================================
+   5. SIMULATION STATE & PASSES
+   ========================================================================== */
+const sim = {
+  W: 0, H: 0, state: null, mat: null, prep: null, reduce: null,
+  progs: {}, mmPerCell: 0.3, cellCss: 1, G: 9000, vmax: 300,
+  frame: 0, dirty: true, sleeping: false, quietReads: 0, sandType: 'beach',
+  lastL: [0, 0, 1], lightDirty: true, initialMass: 0,
+};
+const RW = 16, RH = 16; // reduce target size
+
+function screenAngle() {
+  let a = (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle
+        : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return ((Math.round(a / 90) % 4) + 4) % 4; // quarter turns
+}
+function naturalCss() {
+  const w = window.innerWidth, h = window.innerHeight;
+  return (screenAngle() % 2) ? { w: h, h: w } : { w, h };
+}
+function mmPerCss() {
+  const coarse = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+  const m = Math.min(screen.width || innerWidth, screen.height || innerHeight);
+  return coarse ? (m < 600 ? 0.16 : 0.19) : 0.26;
+}
+
+function buildPrograms() {
+  sim.progs = {
+    vel: makeProgram('vel', FS_VEL), transport: makeProgram('transport', FS_TRANSPORT),
+    relax: makeProgram('relax', FS_RELAX), mat: makeProgram('matadv', FS_MATADV),
+    prep: makeProgram('prep', FS_PREP), main: makeProgram('main', FS_MAIN),
+    reduce: makeProgram('reduce', FS_REDUCE),
+  };
+}
+
+function computeScales() {
+  const nat = naturalCss();
+  const long = Math.max(nat.w, nat.h);
+  sim.cellCss = long / CFG.GRID_LONG;
+  sim.mmPerCell = sim.cellCss * mmPerCss();
+  sim.G = 9810 * CFG.G_SCALE / sim.mmPerCell;            // cells/s^2
+  sim.vmax = CFG.VMAX_MM / sim.mmPerCell;                // cells/s
+  return { W: Math.max(16, Math.round(CFG.GRID_LONG * nat.w / long)), H: Math.max(16, Math.round(CFG.GRID_LONG * nat.h / long)) };
+}
+
+// Initial sand: level with natural, subtle unevenness (low-frequency swells, faint ripples)
+function makeInitialHeights(W, H, seed) {
+  const rnd = mulberry32(seed);
+  const depth = CFG.SAND_DEPTH_MM / sim.mmPerCell;
+  const lat = (n) => { const g = new Float32Array(n * n); for (let i = 0; i < g.length; i++) g[i] = rnd() * 2 - 1; return g; };
+  const octs = [[130, 0.07], [55, 0.035], [22, 0.012], [8, 0.004]].map(([per, amp]) => ({ per, amp: amp * depth, g: lat(64), ox: rnd() * 64, oy: rnd() * 64 }));
+  const sm = t => t * t * (3 - 2 * t);
+  const vn = (o, x, y) => {
+    x = x / o.per + o.ox; y = y / o.per + o.oy;
+    const xi = Math.floor(x), yi = Math.floor(y), fx = sm(x - xi), fy = sm(y - yi);
+    const G = (a, b) => o.g[((b & 63) * 64) + (a & 63)];
+    return lerp(lerp(G(xi, yi), G(xi + 1, yi), fx), lerp(G(xi, yi + 1), G(xi + 1, yi + 1), fx), fy);
+  };
+  const d = new Float32Array(W * H * 4);
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    let h = depth;
+    for (const o of octs) h += o.amp * vn(o, i, j);
+    d[(j * W + i) * 4] = Math.max(0, h);
+  }
+  return d;
+}
+
+function allocSim(W, H, heights) {
+  ['state', 'mat'].forEach(k => { if (sim[k]) { freeTarget(sim[k].a); freeTarget(sim[k].b); } });
+  freeTarget(sim.prep); freeTarget(sim.reduce);
+  sim.W = W; sim.H = H;
+  const F = FMT.simInternal;
+  sim.state = makePingPong(W, H, [F], gl.NEAREST);
+  sim.mat = makePingPong(W, H, [F, F], gl.NEAREST);
+  sim.prep = makeTarget(W, H, [gl.RGBA16F, gl.RGBA16F], gl.LINEAR);
+  sim.reduce = makeTarget(RW, RH, [F], gl.NEAREST);
+  for (const t of [sim.state.a, sim.state.b]) { gl.bindTexture(gl.TEXTURE_2D, t.texs[0]); gl.texImage2D(gl.TEXTURE_2D, 0, F, W, H, 0, gl.RGBA, gl.FLOAT, heights); }
+  sim.dirty = true; sim.lightDirty = true; sim.sleeping = false; sim.quietReads = 0;
+  readback.pending = null;
+}
+
+function resetSand(seed = 1) {
+  const { W, H } = computeScales();
+  allocSim(W, H, makeInitialHeights(W, H, seed));
+  sim.initialMass = readMass();
+}
+
+// Resample the existing heightfield to a new grid aspect (desktop window resize), conserving mass.
+function resampleSim() {
+  const old = readState(); const oW = sim.W, oH = sim.H;
+  const { W, H } = computeScales();
+  if (W === oW && H === oH) return;
+  const d = new Float32Array(W * H * 4);
+  let m0 = 0, m1 = 0;
+  for (let i = 0; i < oW * oH; i++) m0 += old[i * 4];
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    const x = (i + 0.5) * oW / W - 0.5, y = (j + 0.5) * oH / H - 0.5;
+    const xi = clamp(Math.floor(x), 0, oW - 1), yi = clamp(Math.floor(y), 0, oH - 1);
+    const xj = Math.min(xi + 1, oW - 1), yj = Math.min(yi + 1, oH - 1), fx = clamp(x - xi, 0, 1), fy = clamp(y - yi, 0, 1);
+    const g = (a, b) => old[(b * oW + a) * 4];
+    const v = lerp(lerp(g(xi, yi), g(xj, yi), fx), lerp(g(xi, yj), g(xj, yj), fx), fy);
+    d[(j * W + i) * 4] = v; m1 += v;
+  }
+  const k = m1 > 0 ? m0 / m1 * (oW * oH) / (W * H) * (W * H) / (oW * oH) : 1;
+  for (let i = 0; i < W * H; i++) d[i * 4] *= k;
+  allocSim(W, H, d);
+}
+
+function readState() {
+  const t = sim.state.read;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+  const out = new Float32Array(sim.W * sim.H * 4);
+  gl.readPixels(0, 0, sim.W, sim.H, gl.RGBA, gl.FLOAT, out);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return out;
+}
+function readMass() { const s = readState(); let m = 0; for (let i = 0; i < s.length; i += 4) m += s[i]; return m; }
+
+// -- physics frame: substeps of VEL + TRANSPORT, then RELAX and MATADV --------
+const simTiming = { ms: 0, n: 0 };
+function simFrame(dt) {
+  const P = sim.progs;
+  const g = input.gEff;                      // device-frame accel, units of G
+  const G = sim.G;
+  const uG = [g[0] * G, g[1] * G, g[2] * G];
+  const gn = Math.max(-uG[2], CFG.GN_MIN * G);
+  // substeps: advection CFL + gravity-wave CFL (wave speed from the async max-height readback)
+  const hmax = readback.valid ? Math.max(readback.hmax, 1) : 6 * CFG.SAND_DEPTH_MM / sim.mmPerCell;
+  const cw = Math.sqrt(Math.max(gn, -uG[2]) * CFG.K_PRESSURE * hmax * 1.15);
+  const S = clamp(Math.ceil(Math.max(dt * sim.vmax / CFG.CFL, dt * (sim.vmax + cw) / CFG.WAVE_CFL)), CFG.SUB_MIN, CFG.SUB_MAX);
+  const sdt = dt / S;
+  const mu = SANDS[sim.sandType].mu;
+  const fluidDecay = Math.exp(-sdt / CFG.FLUID_TAU);
+  const shakeFluid = input.shakeFluid;
+  const kick = shakeFluid * CFG.SHAKE_KICK * G;
+  const seed = (sim.frame % 997) + 0.5;
+  const fArr = fingerArrays();
+  for (let s = 0; s < S; s++) {
+    fingerUniforms(fArr, (s + 1) / S);
+    runPass(P.vel, sim.state.write, {
+      uGrid: [sim.W, sim.H], uDt: sdt, uVmax: sim.vmax, uK: CFG.K_PRESSURE, uKa: CFG.K_ACTIVE, uMuS: CFG.MU_S * mu, uMuD: CFG.MU_D * mu,
+      uMuThin: CFG.MU_THIN, uThinH: CFG.THIN_H, uVStick: CFG.V_STICK, uGnMin: CFG.GN_MIN * G,
+      uShakeFluid: shakeFluid, uKick: kick, uFluidDecay: fluidDecay, uPushK: CFG.PUSH_K, uSeed: seed, uVisc: CFG.VISC,
+      uG, uFA: fArr.A, uFB: fArr.B, uNF: fArr.n,
+    }, { uState: sim.state.read.texs[0] });
+    sim.state.swap();
+    runPass(P.transport, sim.state.write, { uGrid: [sim.W, sim.H], uDt: sdt }, { uState: sim.state.read.texs[0] });
+    sim.state.swap();
+  }
+  for (let i = 0; i < CFG.RELAX_ITERS; i++) {
+    runPass(P.relax, sim.state.write, {
+      uGrid: [sim.W, sim.H], uGdir: norm3(g), uT: CFG.RELAX_T * mu, uC: CFG.RELAX_C,
+      uMuThin: CFG.MU_THIN, uThinH: CFG.THIN_H, uShakeFluid: shakeFluid,
+    }, { uState: sim.state.read.texs[0] });
+    sim.state.swap();
+  }
+  runPass(P.mat, sim.mat.write, { uGrid: [sim.W, sim.H], uDtF: dt, uL: CFG.MAT_L },
+    { uState: sim.state.read.texs[0], uM1: sim.mat.read.texs[0], uM2: sim.mat.read.texs[1] });
+  sim.mat.swap();
+  sim.frame++;
+  sim.dirty = true;
+  sim.lastSubsteps = S;
+}
+
+/* ============================================================================
+   6. RENDER PASSES
+   ========================================================================== */
+const render = { scale: 1, lastFrameMs: 0, palette: null, debug: +(QS.get('debug') || 0) };
+
+function lightDir() {
+  // Light fixed in the WORLD: build "up" from (partially) the gravity direction, so tilting
+  // the device moves the light across the screen a little.
+  const g = input.gDir;
+  const upFull = norm3([-g[0], -g[1], -g[2]]);
+  const up = norm3([upFull[0] * CFG.LIGHT_TILT_GAIN, upFull[1] * CFG.LIGHT_TILT_GAIN, lerp(1, upFull[2], CFG.LIGHT_TILT_GAIN)]);
+  const az = CFG.LIGHT_AZ * Math.PI / 180, el = CFG.LIGHT_ELEV * Math.PI / 180;
+  const ref = [Math.cos(az), Math.sin(az), 0];
+  const d = ref[0] * up[0] + ref[1] * up[1] + ref[2] * up[2];
+  const hz = norm3([ref[0] - up[0] * d, ref[1] - up[1] * d, ref[2] - up[2] * d]);
+  return norm3([up[0] * Math.sin(el) + hz[0] * Math.cos(el), up[1] * Math.sin(el) + hz[1] * Math.cos(el), up[2] * Math.sin(el) + hz[2] * Math.cos(el)]);
+}
+
+function paletteUniforms() {
+  const sd = SANDS[sim.sandType];
+  const pal = [], cdf = []; let acc = 0; const avg = [0, 0, 0];
+  const tot = sd.pal.reduce((a, b) => a + b[1], 0);
+  sd.pal.forEach(([hex, p]) => { const c = hexLin(hex); pal.push(...c); acc += p / tot; cdf.push(acc); for (let i = 0; i < 3; i++) avg[i] += c[i] * p / tot; });
+  cdf[5] = 1.01;
+  render.palette = { pal: new Float32Array(pal), cdf: new Float32Array(cdf), avg, glint: sd.glint };
+}
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const s = clamp(Math.min(dpr, CFG.RENDER_SCALE_MAX) * render.qualityMul, CFG.RENDER_SCALE_MIN, CFG.RENDER_SCALE_MAX);
+  const w = Math.round(window.innerWidth * s), h = Math.round(window.innerHeight * s);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; sim.lightDirty = true; }
+  render.scale = s;
+}
+render.qualityMul = 1;
+
+const renderTiming = { ms: 0 };
+function updateLight() {
+  const L = lightDir();
+  const dL = Math.abs(L[0] - sim.lastL[0]) + Math.abs(L[1] - sim.lastL[1]) + Math.abs(L[2] - sim.lastL[2]);
+  if (dL > 4e-4) { sim.lastL = L; sim.lightDirty = true; }
+}
+function renderFrame() {
+  const P = sim.progs;
+  updateLight();
+  if (sim.dirty || sim.lightDirty) {
+    runPass(P.prep, sim.prep, { uGrid: [sim.W, sim.H], uL: sim.lastL, uWallH: CFG.WALL_H_MM / sim.mmPerCell },
+      { uState: sim.state.read.texs[0] });
+  }
+  if (!render.palette) paletteUniforms();
+  const pal = render.palette;
+  // grains per sim cell: tie grain size to CSS px, not to render resolution
+  const grainScale = sim.cellCss / CFG.GRAIN_CSS;
+  const ki = CFG.KEY_I, si = CFG.SKY_I;
+  runPass(P.main, null, {
+    uGrid: [sim.W, sim.H], uRes: [canvas.width, canvas.height], uRot: input.rot,
+    uL: sim.lastL, uKey: CFG.KEY.map(x => x * ki), uSky: CFG.SKY.map(x => x * si),
+    uGrainScale: grainScale, uMatL: CFG.MAT_L, uMmPerCell: sim.mmPerCell, uExposure: CFG.EXPOSURE,
+    uGlintP: pal.glint, uFrame: sim.frame, uDebug: render.debug | 0, uPal: pal.pal, uPalCdf: pal.cdf, uPalAvg: pal.avg,
+  }, { uP0: sim.prep.texs[0], uP1: sim.prep.texs[1], uM1: sim.mat.read.texs[0], uM2: sim.mat.read.texs[1] });
+  sim.dirty = false; sim.lightDirty = false;
+}
+
+// -- async readback of flow energy (PBO + fence; never stalls the pipeline) ----
+const readback = { pbo: null, fence: null, pending: null, data: new Float32Array(RW * RH * 4),
+                   mass: 0, flow: 0, hmax: 0, vmax: 0, valid: false };
+function issueReduce() {
+  if (readback.fence) return; // previous still in flight
+  runPass(sim.progs.reduce, sim.reduce, { uGrid: [sim.W, sim.H], uBlock: [Math.ceil(sim.W / RW), Math.ceil(sim.H / RH)] },
+    { uState: sim.state.read.texs[0] });
+  if (!FMT.sim32) return;
+  if (!readback.pbo) { readback.pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, readback.pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, RW * RH * 16, gl.STREAM_READ); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sim.reduce.fbo);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, readback.pbo);
+  gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, 0);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  readback.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  gl.flush();
+}
+// synchronous variant (tests / deterministic stepping): no PBO, no fence
+function syncReduce() {
+  if (readback.fence) { gl.deleteSync(readback.fence); readback.fence = null; }
+  runPass(sim.progs.reduce, sim.reduce, { uGrid: [sim.W, sim.H], uBlock: [Math.ceil(sim.W / RW), Math.ceil(sim.H / RH)] },
+    { uState: sim.state.read.texs[0] });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sim.reduce.fbo);
+  gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, readback.data);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  processReduce();
+}
+function pollReduce(force) {
+  if (!readback.fence) return false;
+  if (!force && gl.getSyncParameter(readback.fence, gl.SYNC_STATUS) !== gl.SIGNALED) return false;
+  if (force) gl.clientWaitSync(readback.fence, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
+  gl.deleteSync(readback.fence); readback.fence = null;
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, readback.pbo);
+  gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, readback.data);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  processReduce();
+  return true;
+}
+function processReduce() {
+  let m = 0, f = 0, vm = 0, e = 0; const d = readback.data; // e = max h
+  for (let i = 0; i < RW * RH; i++) { m += d[i * 4]; f += d[i * 4 + 1]; vm = Math.max(vm, d[i * 4 + 2]); e = Math.max(e, d[i * 4 + 3]); }
+  readback.mass = m; readback.flow = f; readback.vmax = vm; readback.hmax = e; readback.valid = true;
+  onFlowSample();
+}
+
+/* ============================================================================
+   7. INPUT — device motion, fingers, fallback tilt, keyboard, shake
+   ========================================================================== */
+const input = {
+  gDir: [0, 0, -1],        // low-passed gravity direction (device frame, unit)
+  gEff: [0, 0, -1],        // gravity + inertial accel from shaking (units of G)
+  userAcc: [0, 0, 0],      // device linear accel (units of g), high-passed
+  shakeFluid: 0,
+  rot: 0,
+  motionMode: 'pending',   // 'pending' | 'sensor' | 'fallback' | 'test'
+  motionEvents: 0, signFlip: null,
+  virt: { x: 0, y: 0, tx: 0, ty: 0, held: false },   // fallback virtual tilt (radians)
+  keys: new Set(),
+  fingers: new Map(),      // pointerId -> finger
+  tilters: new Map(),      // pointers used for 2-finger / right-drag tilt
+  testGravity: null, testShake: [0, 0, 0],
+  levelT: 0, rawG: [0, 0, -1],
+};
+
+function cssToCell(x, y) {
+  let u = x / window.innerWidth, v = 1 - y / window.innerHeight;
+  let q = [u - 0.5, v - 0.5];
+  for (let i = 0; i < input.rot; i++) q = [q[1], -q[0]];
+  return [(q[0] + 0.5) * sim.W, (q[1] + 0.5) * sim.H];
+}
+function screenVecToDevice(dx, dy) { // screen-space vector (x right, y up) -> device frame
+  let q = [dx, dy];
+  for (let i = 0; i < input.rot; i++) q = [q[1], -q[0]];
+  return q;
+}
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x == null) return;
+  input.motionEvents++;
+  // W3C: accelIncludingGravity ~ (0,0,+9.81) when lying face up -> gravity = -a.
+  // Some (older iOS) builds report the opposite sign; detect once assuming the user starts face-up-ish.
+  let g = [-a.x / 9.81, -a.y / 9.81, -a.z / 9.81];
+  if (input.signFlip === null && input.motionEvents > 3) input.signFlip = g[2] > 0.35;
+  if (input.signFlip) g = g.map(x => -x);
+  input.rawG = g;
+  const la = e.acceleration;
+  if (la && la.x != null) {
+    const s = input.signFlip ? -1 : 1;
+    input.userAcc = [s * la.x / 9.81, s * la.y / 9.81, s * la.z / 9.81];
+    input.hasLinear = true;
+  }
+  if (input.motionMode === 'pending' && input.motionEvents > 2) { input.motionMode = 'sensor'; updateNote(); }
+}
+
+function updateInput(dt) {
+  input.rot = screenAngle();
+  // --- gravity source
+  let target;
+  if (input.testGravity) target = input.testGravity;
+  else if (input.motionMode === 'sensor') target = input.rawG;
+  else {
+    // virtual tray: keys / drags set a target tilt, springs back to level when released
+    const v = input.virt;
+    let kx = 0, ky = 0;
+    if (input.keys.has('ArrowLeft')) kx -= 1; if (input.keys.has('ArrowRight')) kx += 1;
+    if (input.keys.has('ArrowUp')) ky += 1; if (input.keys.has('ArrowDown')) ky -= 1;
+    if (kx || ky) { const d = screenVecToDevice(kx, ky); v.tx = d[0] * 0.95; v.ty = d[1] * 0.95; }
+    else if (!v.held) { v.tx *= Math.exp(-dt / 0.6); v.ty *= Math.exp(-dt / 0.6); }
+    v.x = lerp(v.x, v.tx, 1 - Math.exp(-dt / 0.08)); v.y = lerp(v.y, v.ty, 1 - Math.exp(-dt / 0.08));
+    target = norm3([Math.sin(v.x), Math.sin(v.y), -Math.cos(v.x) * Math.cos(v.y)]);
+  }
+  const k = input.testGravity ? 1 : 1 - Math.exp(-dt / 0.07);
+  input.gDir = norm3(input.gDir.map((x, i) => lerp(x, target[i], k)));
+  // --- shake: linear accel of the device; sand feels the opposite (inertia)
+  let ua = input.testShake;
+  if (!input.testGravity && input.motionMode === 'sensor') {
+    ua = input.hasLinear ? input.userAcc : input.rawG.map((x, i) => (x - input.gDir[i]));
+  }
+  if (input.levelT > 0) {          // "Smooth" button: gentle synthetic shake
+    input.levelT -= dt;
+    const t = performance.now() / 1000;
+    ua = [ua[0] + 0.35 * Math.sin(t * 41), ua[1] + 0.35 * Math.cos(t * 37), ua[2]];
+  }
+  const mag = Math.hypot(ua[0], ua[1], ua[2]);
+  const target_f = clamp((mag - 0.22) / 0.9, 0, 1);
+  input.shakeFluid = Math.max(target_f, input.shakeFluid * Math.exp(-dt / CFG.SHAKE_TAU));
+  if (input.levelT > 0) input.shakeFluid = Math.max(input.shakeFluid, 0.95 * Math.min(1, input.levelT / 0.4));
+  input.gEff = [input.gDir[0] - ua[0], input.gDir[1] - ua[1], input.gDir[2] - ua[2]];
+  // --- fingers: advance frame positions & velocity
+  for (const f of input.fingers.values()) {
+    f.px = f.x; f.py = f.y; f.x = f.tx; f.y = f.ty;
+    const vx = (f.x - f.px) / dt, vy = (f.y - f.py) / dt;
+    f.vx = lerp(f.vx, vx, 0.6); f.vy = lerp(f.vy, vy, 0.6);
+  }
+}
+
+function fingerArrays() {
+  const A = new Float32Array(16), B = new Float32Array(16);
+  let n = 0; const R = CFG.FINGER_R_MM / sim.mmPerCell;
+  const list = [];
+  for (const f of input.fingers.values()) { if (n >= 4) break; list.push(f); n++; }
+  return { A, B, n, list, R };
+}
+function fingerUniforms(fa, a) {
+  fa.list.forEach((f, i) => {
+    fa.A[i * 4] = lerp(f.px, f.x, a); fa.A[i * 4 + 1] = lerp(f.py, f.y, a); fa.A[i * 4 + 2] = fa.R;
+    const sp = Math.hypot(f.vx, f.vy);
+    fa.B[i * 4] = f.vx; fa.B[i * 4 + 1] = f.vy; fa.B[i * 4 + 2] = CFG.FINGER_TIP;
+    fa.B[i * 4 + 3] = clamp((sp - sim.vmax * 0.6) / (sim.vmax * 1.5), 0, 0.8);   // fast swipes throw sand
+  });
+}
+
+function fingerDown(id, x, y) {
+  const [cx, cy] = cssToCell(x, y);
+  input.fingers.set(id, { x: cx, y: cy, px: cx, py: cy, tx: cx, ty: cy, vx: 0, vy: 0 });
+  wake();
+}
+function fingerMove(id, x, y) { const f = input.fingers.get(id); if (!f) return; const [cx, cy] = cssToCell(x, y); f.tx = cx; f.ty = cy; }
+function fingerUp(id) { input.fingers.delete(id); }
+
+function setupPointer() {
+  const usesTilt = (e) => (e.pointerType === 'mouse' && e.button === 2);
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (!started) return;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    if (usesTilt(e)) { input.tilters.set(e.pointerId, { x: e.clientX, y: e.clientY }); input.virt.held = true; return; }
+    // fallback: a second finger turns both into a tilt gesture
+    if (input.motionMode !== 'sensor' && e.pointerType === 'touch' && input.fingers.size === 1 && input.tilters.size === 0) {
+      for (const [id, f] of input.fingers) { input.tilters.set(id, null); input.fingers.delete(id); }
+      input.tilters.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      input.virt.held = true; input.virt.ref = null;
+      return;
+    }
+    if (input.tilters.size) { input.tilters.set(e.pointerId, { x: e.clientX, y: e.clientY }); return; }
+    fingerDown(e.pointerId, e.clientX, e.clientY);
+  }, { passive: false });
+  canvas.addEventListener('pointermove', e => {
+    if (input.tilters.has(e.pointerId)) {
+      input.tilters.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const pts = [...input.tilters.values()].filter(Boolean);
+      if (!pts.length) return;
+      const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length, cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+      const v = input.virt;
+      if (!v.ref) v.ref = { x: cx, y: cy, tx: v.tx, ty: v.ty };
+      const d = screenVecToDevice((cx - v.ref.x) / 160, -(cy - v.ref.y) / 160);
+      v.tx = clamp(v.ref.tx + d[0], -1.2, 1.2); v.ty = clamp(v.ref.ty + d[1], -1.2, 1.2);
+      wake(); return;
+    }
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    const last = evs.length ? evs[evs.length - 1] : e;
+    fingerMove(e.pointerId, last.clientX, last.clientY);
+  });
+  const up = e => {
+    if (input.tilters.has(e.pointerId)) { input.tilters.delete(e.pointerId); if (!input.tilters.size) { input.virt.held = false; input.virt.ref = null; } else input.virt.ref = null; return; }
+    fingerUp(e.pointerId);
+  };
+  canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  window.addEventListener('keydown', e => { if (e.key.startsWith('Arrow')) { input.keys.add(e.key); wake(); e.preventDefault(); } if (e.key === 's') level(); });
+  window.addEventListener('keyup', e => input.keys.delete(e.key));
+  // block page gestures (iOS)
+  ['gesturestart', 'gesturechange', 'touchmove'].forEach(t => document.addEventListener(t, e => e.preventDefault(), { passive: false }));
+  document.addEventListener('dblclick', e => e.preventDefault());
+}
+
+function startMotion() {
+  window.addEventListener('devicemotion', onMotion);
+  setTimeout(() => {
+    if (input.motionMode === 'pending') {
+      input.motionMode = 'fallback';
+      updateNote();
+      toast(matchMedia('(pointer: coarse)').matches ? 'Two-finger drag to tilt' : 'Arrow keys or right-drag to tilt', 3500);
+    }
+  }, CFG.MOTION_DETECT_MS);
+}
+
+function level() { input.levelT = 1.6; wake(); }
+
+/* ============================================================================
+   8. AUDIO & HAPTICS — synthesized granular hiss, avalanche thumps
+   ========================================================================== */
+const audio = { ctx: null, on: true, flowGain: null, flowLP: null, plowGain: null, plowBP: null, master: null, lastThump: 0, flowHist: [] };
+
+function initAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC || audio.ctx) return;
+  const ctx = new AC();
+  audio.ctx = ctx;
+  const sr = ctx.sampleRate, len = Math.floor(sr * 2.5);
+  const buf = ctx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  const rnd = mulberry32(99);
+  for (let i = 0; i < len; i++) d[i] = (rnd() * 2 - 1) * 0.05;
+  // thousands of tiny grain clicks (exponentially decaying noise bursts)
+  const nGr = Math.floor(len / sr * 5200);
+  for (let g = 0; g < nGr; g++) {
+    const p = Math.floor(rnd() * len), a = Math.pow(rnd(), 2.5), L = 6 + Math.floor(rnd() * 70);
+    for (let k = 0; k < L; k++) d[(p + k) % len] += (rnd() * 2 - 1) * a * Math.exp(-k / (L * 0.25));
+  }
+  let mx = 0; for (let i = 0; i < len; i++) mx = Math.max(mx, Math.abs(d[i]));
+  for (let i = 0; i < len; i++) d[i] /= mx;
+  audio.noise = buf;
+  const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 350;
+  audio.master = ctx.createGain(); audio.master.gain.value = audio.on ? 1 : 0; audio.master.connect(ctx.destination);
+  // flow layer
+  audio.flowLP = ctx.createBiquadFilter(); audio.flowLP.type = 'lowpass'; audio.flowLP.frequency.value = 2500; audio.flowLP.Q.value = 0.4;
+  audio.flowGain = ctx.createGain(); audio.flowGain.gain.value = 0;
+  src.connect(hp); hp.connect(audio.flowLP); audio.flowLP.connect(audio.flowGain); audio.flowGain.connect(audio.master);
+  // plow layer (finger) — a second, offset read of the same buffer, band-passed brighter
+  const src2 = ctx.createBufferSource(); src2.buffer = buf; src2.loop = true; src2.playbackRate.value = 1.17;
+  audio.plowBP = ctx.createBiquadFilter(); audio.plowBP.type = 'bandpass'; audio.plowBP.frequency.value = 3200; audio.plowBP.Q.value = 0.6;
+  audio.plowGain = ctx.createGain(); audio.plowGain.gain.value = 0;
+  src2.connect(audio.plowBP); audio.plowBP.connect(audio.plowGain); audio.plowGain.connect(audio.master);
+  src.start(); src2.start(0, 1.1);
+}
+
+function audioFrame() {
+  if (!audio.ctx) return;
+  const t = audio.ctx.currentTime;
+  const m = Math.max(readback.mass, 1);
+  // flow: moving mass fraction * speed
+  const flow = clamp(readback.flow / m / (sim.vmax * 0.25), 0, 1.5);
+  const fGain = clamp(Math.pow(flow, 0.8) * 0.55, 0, 0.6);
+  audio.flowGain.gain.setTargetAtTime(fGain, t, 0.06);
+  audio.flowLP.frequency.setTargetAtTime(1200 + 6000 * clamp(flow, 0, 1), t, 0.08);
+  let plow = 0;
+  for (const f of input.fingers.values()) plow += Math.hypot(f.vx, f.vy);
+  plow = clamp(plow / (sim.vmax * 1.2), 0, 1.2);
+  audio.plowGain.gain.setTargetAtTime(Math.pow(plow, 0.7) * 0.45, t, 0.03);
+  audio.plowBP.frequency.setTargetAtTime(1800 + 3500 * plow, t, 0.05);
+  // haptic ticks while plowing (Android)
+  if (plow > 0.15 && navigator.vibrate && audio.on && Math.random() < plow * 0.25) navigator.vibrate(6);
+}
+
+// Detect an avalanche hitting the wall: sudden drop of moving mass
+function onFlowSample() {
+  const m = Math.max(readback.mass, 1);
+  const f = readback.flow / m;
+  const h = audio.flowHist; h.push(f); if (h.length > 8) h.shift();
+  if (h.length < 8) return;
+  const peak = Math.max(...h.slice(0, 4)), now = h[h.length - 1];
+  const drop = (peak - now) / (sim.vmax * 0.15);
+  const tNow = performance.now();
+  if (drop > 0.35 && tNow - audio.lastThump > 450) { audio.lastThump = tNow; thump(clamp(drop, 0, 1.5)); }
+}
+function thump(intensity) {
+  if (navigator.vibrate && audio.on) navigator.vibrate(Math.round(12 + 18 * intensity));
+  if (!audio.ctx || !audio.on) return;
+  const ctx = audio.ctx, t = ctx.currentTime;
+  const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(85, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.25);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35 * intensity + 0.01, t + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+  o.connect(g); g.connect(audio.master); o.start(t); o.stop(t + 0.4);
+  const n = ctx.createBufferSource(); n.buffer = audio.noise;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500;
+  const ng = ctx.createGain(); ng.gain.setValueAtTime(0.25 * intensity, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+  n.connect(lp); lp.connect(ng); ng.connect(audio.master); n.start(t, Math.random()); n.stop(t + 0.25);
+}
+function setSound(on) {
+  audio.on = on;
+  if (audio.master) audio.master.gain.setTargetAtTime(on ? 1 : 0, audio.ctx.currentTime, 0.05);
+  $('btnSound').textContent = on ? 'Sound on' : 'Sound off';
+}
+
+/* ============================================================================
+   9. UI — intro, settings sheet, toast, wake lock
+   ========================================================================== */
+let started = false;
+function toast(msg, ms) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), ms || 2500);
+}
+function updateNote() {
+  const n = $('note');
+  if (input.motionMode === 'fallback') { n.style.display = 'block'; n.textContent = 'Motion sensors unavailable — tilt with a two-finger drag, arrow keys, or right-drag.'; }
+  else n.style.display = 'none';
+}
+function buildSheet() {
+  const box = $('types');
+  for (const key in SANDS) {
+    const b = document.createElement('button');
+    b.innerHTML = `<i style="background:${SANDS[key].sw}"></i>${SANDS[key].name.split(' ')[0]}`;
+    b.dataset.k = key;
+    b.onclick = () => setSandType(key);
+    box.appendChild(b);
+  }
+  markSel();
+  $('menuBtn').onclick = (e) => { e.stopPropagation(); $('sheet').classList.toggle('open'); };
+  $('btnSmooth').onclick = () => { level(); $('sheet').classList.remove('open'); };
+  $('btnSound').onclick = () => setSound(!audio.on);
+  canvas.addEventListener('pointerdown', () => $('sheet').classList.remove('open'));
+}
+function markSel() { document.querySelectorAll('#types button').forEach(b => b.classList.toggle('sel', b.dataset.k === sim.sandType)); }
+function setSandType(k) { if (!SANDS[k]) return; sim.sandType = k; paletteUniforms(); sim.lightDirty = true; markSel(); }
+
+let wakeLock = null;
+async function requestWakeLock() { try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && started) requestWakeLock(); });
+
+async function begin(opts = {}) {
+  if (started) return;
+  started = true;
+  $('intro').classList.add('gone');
+  $('menuBtn').style.display = 'block';
+  if (!opts.silent) {
+    try { initAudio(); if (audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume(); } catch (e) { console.warn(e); }
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        const r = await DeviceMotionEvent.requestPermission();
+        if (r !== 'granted') { input.motionMode = 'fallback'; }
+      }
+    } catch (_) { /* not from gesture / denied -> fallback */ }
+    requestWakeLock();
+  }
+  if (opts.test) input.motionMode = 'test';
+  if (input.motionMode === 'pending') startMotion();
+  else if (input.motionMode === 'fallback') { updateNote(); toast('Two-finger drag to tilt', 3500); }
+  wake();
+}
+
+/* ============================================================================
+   10. MAIN LOOP, SLEEP, QUALITY AUTO-SCALER, LIFECYCLE
+   ========================================================================== */
+const loop = { paused: TEST, last: 0, raf: 0, ftEMA: 16.7, slowT: 0, fastT: 0 };
+let lastG = [0, 0, -1];
+
+function wake() { sim.sleeping = false; sim.quietReads = 0; }
+function checkSleep() {
+  const g = input.gEff;
+  const dg = Math.abs(g[0] - lastG[0]) + Math.abs(g[1] - lastG[1]) + Math.abs(g[2] - lastG[2]);
+  if (dg > 0.004 || input.fingers.size || input.shakeFluid > 0.01 || input.levelT > 0) { lastG = g.slice(); wake(); return; }
+  if (readback.valid && readback.flow < 0.02 * readback.mass && readback.vmax < 25) sim.quietReads++; else sim.quietReads = 0;
+  if (sim.quietReads > 12) sim.sleeping = true;
+}
+
+function tick(now) {
+  loop.raf = requestAnimationFrame(tick);
+  if (loop.paused || !gl || gl.isContextLost()) { loop.last = now; return; }
+  const rawDt = loop.last ? (now - loop.last) / 1000 : 1 / 60;
+  loop.last = now;
+  const dt = clamp(rawDt, 1 / 240, 1 / 30);
+  updateInput(dt);
+  pollReduce(false);
+  checkSleep();
+  if (!sim.sleeping) { simFrame(dt); issueReduce(); }
+  resizeCanvas();
+  updateLight();
+  if (sim.dirty || sim.lightDirty) renderFrame();
+  audioFrame();
+  // quality auto-scaler from frame interval (vsync-bound, so slow frames => drop resolution)
+  loop.ftEMA = lerp(loop.ftEMA, rawDt * 1000, 0.05);
+  if (!sim.sleeping) {
+    if (loop.ftEMA > 21) { loop.slowT += rawDt; loop.fastT = 0; } else if (loop.ftEMA < 15) { loop.fastT += rawDt; loop.slowT = 0; }
+    if (loop.slowT > 1.0 && render.qualityMul > 0.45) { render.qualityMul *= 0.85; loop.slowT = 0; loop.ftEMA = 16.7; }
+    if (loop.fastT > 4.0 && render.qualityMul < 1) { render.qualityMul = Math.min(1, render.qualityMul * 1.08); loop.fastT = 0; }
+  }
+}
+
+function onResize() {
+  if (!gl) return;
+  input.rot = screenAngle();
+  const { W, H } = computeScales();
+  // rotation keeps the device-frame grid (the tray IS the phone); only aspect changes resample
+  if (Math.abs(W / H - sim.W / sim.H) > 0.02) resampleSim();
+  resizeCanvas();
+  sim.lightDirty = true; wake();
+}
+
+function initAll() {
+  if (!initGL()) { $('fatal').style.display = 'flex'; $('fatal').textContent = 'This device does not support WebGL2.'; return false; }
+  buildPrograms();
+  resetSand(1);
+  paletteUniforms();
+  resizeCanvas();
+  renderFrame();
+  return true;
+}
+
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); loop.paused = true; readback.fence = null; readback.pbo = null; });
+canvas.addEventListener('webglcontextrestored', () => {
+  sim.state = sim.mat = sim.prep = sim.reduce = null;
+  initGL(); buildPrograms(); resetSand(1); paletteUniforms(); loop.paused = TEST; renderFrame();
+});
+window.addEventListener('resize', onResize);
+if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', onResize);
+
+/* ============================================================================
+   11. TEST HOOK — deterministic stepping for Playwright (always available)
+   ========================================================================== */
+function gpuSync() { // force completion (gl.finish is not reliably blocking in Chrome)
+  const px = new Uint8Array(4); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+}
+window.__sand = {
+  ready: false,
+  begin: () => begin({ silent: true, test: true }),
+  pause() { loop.paused = true; }, resume() { loop.paused = false; loop.last = 0; },
+  setTilt(x, y, z) { input.testGravity = norm3([x, y, z]); },
+  setShake(x, y, z = 0) { input.testShake = [x, y, z]; },
+  touchDown: (id, x, y) => fingerDown(id, x, y), touchMove: (id, x, y) => fingerMove(id, x, y), touchUp: id => fingerUp(id),
+  step(n = 1) {
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) { updateInput(1 / 60); simFrame(1 / 60); syncReduce(); }
+    gpuSync();
+    const ms = (performance.now() - t0) / n;
+    simTiming.ms = ms; return ms;
+  },
+  render() {
+    resizeCanvas();
+    const t0 = performance.now(); sim.lightDirty = true; renderFrame(); gpuSync();
+    renderTiming.ms = performance.now() - t0; return renderTiming.ms;
+  },
+  mass: () => readMass(),
+  flow() { syncReduce(); return { mass: readback.mass, flow: readback.flow, vmax: readback.vmax }; },
+  stats: () => ({ grid: [sim.W, sim.H], substeps: sim.lastSubsteps, G: sim.G, vmax: sim.vmax, mmPerCell: sim.mmPerCell,
+                  canvas: [canvas.width, canvas.height], renderScale: render.scale, simMsPerFrame: simTiming.ms, renderMs: renderTiming.ms,
+                  frame: sim.frame, initialMass: sim.initialMass, float32: FMT.sim32, renderer: gl.getParameter(gl.RENDERER) }),
+  setSand: k => setSandType(k), setDebug: d => { render.debug = d; }, level: () => level(), reset: (seed) => resetSand(seed || 1),
+  heights() { const s = readState(); const h = new Float32Array(sim.W * sim.H); for (let i = 0; i < h.length; i++) h[i] = s[i * 4]; return { W: sim.W, H: sim.H, h: Array.from(h) }; },
+  readPrep(att, i, j) { // debug: read one texel of a prep attachment
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sim.prep.fbo); gl.readBuffer(gl.COLOR_ATTACHMENT0 + att);
+    const o = new Float32Array(4); gl.readPixels(i, j, 1, 1, gl.RGBA, gl.FLOAT, o);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return Array.from(o);
+  },
+  readMat(i, j, n = 6) { // debug: n texels along x of both material attachments
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sim.mat.read.fbo); const out = [];
+    for (const a of [0, 1]) { gl.readBuffer(gl.COLOR_ATTACHMENT0 + a); const o = new Float32Array(4 * n); gl.readPixels(i, j, n, 1, gl.RGBA, gl.FLOAT, o); out.push(Array.from(o).map(x => +x.toFixed(2))); }
+    gl.readBuffer(gl.COLOR_ATTACHMENT0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return out;
+  },
+  light: () => sim.lastL,
+  cfg: CFG,
+};
+
+/* ============================================================================
+   BOOT
+   ========================================================================== */
+buildSheet();
+setupPointer();
+$('intro').addEventListener('click', () => begin());
+try {
+  if (initAll()) { window.__sand.ready = true; requestAnimationFrame(tick); }
+} catch (e) { console.error(e); $('fatal').style.display = 'flex'; $('fatal').textContent = 'Could not start: ' + e.message; }
+})();
+</script>
+</body>
+</html>
